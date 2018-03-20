@@ -1,4 +1,4 @@
-CXXFLAGS += @OPENMP_CXXFLAGS@ -O3 -std=c++11 -Isrc -I@capnp@/include -I@mathinc@
+CXXFLAGS += @OPENMP_CXXFLAGS@ -O3 -std=c++11 -Isrc -I@capnp@/include -I@mathinc@ -ggdb
 CPPFLAGS += @OPENMP_CPPFLAGS@ @amcppflags@
 
 UNAME_S=$(shell uname -s)
@@ -18,6 +18,7 @@ SOURCES=\
 	src/mash/CommandScreen.cpp \
 	src/mash/CommandFind.cpp \
 	src/mash/CommandInfo.cpp \
+	src/mash/CommandViz.cpp \
 	src/mash/CommandPaste.cpp \
 	src/mash/CommandSketch.cpp \
 	src/mash/CommandList.cpp \

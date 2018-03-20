@@ -13,6 +13,7 @@
 #include "CommandScreen.h"
 #include "CommandContain.h"
 #include "CommandInfo.h"
+#include "CommandViz.h"
 #include "CommandPaste.h"
 
 int main(int argc, const char ** argv)
@@ -31,6 +32,7 @@ int main(int argc, const char ** argv)
 	commandList.addCommand(new mash::CommandFind());
 #endif
     commandList.addCommand(new mash::CommandInfo());
+    commandList.addCommand(new mash::CommandViz());
     commandList.addCommand(new mash::CommandPaste());
     commandList.addCommand(new mash::CommandBounds());
     
