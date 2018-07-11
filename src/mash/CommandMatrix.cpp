@@ -12,6 +12,7 @@
 #include "ThreadPool.h"
 #include "sketchParameterSetup.h"
 #include <math.h>
+#include <random>
 
 #ifdef USE_BOOST
     #include <boost/math/distributions/binomial.hpp>
@@ -47,6 +48,7 @@ CommandMatrix::CommandMatrix()
     
     useOption("help");
     addOption("list", Option(Option::Boolean, "l", "Input", "List input. Lines in each <file> specify paths to sequence files, one per line.", ""));
+    addOption("bootstrap", Option(Option::Number, "B", "Output", "Print additional bootstrap matrices.", ""));
     // addOption("pvalue", Option(Option::Number, "v", "Output", "Maximum p-value to report.", "1.0", 0., 1.));
     useSketchOptions();
 }
@@ -60,7 +62,7 @@ int CommandMatrix::run() const
     }
     
     int threads = options.at("threads").getArgumentAsNumber();
-    int bootstrap = 0;
+    int bootstrap = options.at("bootstrap").getArgumentAsNumber();
     
     Sketch::Parameters parameters;
     
@@ -84,7 +86,7 @@ int CommandMatrix::run() const
     {
         filenames = arguments;
     }
-    
+
     auto genomes = std::vector<Genome>{};
     std::transform(filenames.begin(), filenames.end(), std::back_inserter(genomes),[](std::string file_name){
         return Genome::fromFile(file_name);
@@ -104,10 +106,17 @@ int CommandMatrix::run() const
     print_matrix(names, matrix);
 
     if (bootstrap > 0) {
-        // resketch
-        auto sketch = Sketch(genomes, parameters);
-        auto matrix = compute_matrix(sketch, threads);
-        print_matrix(names, matrix);
+        auto original_seed = parameters.seed;
+        auto seedseq = std::minstd_rand(original_seed);
+        bootstrap--;
+        for (; bootstrap > 0; bootstrap--) {
+            // generate seed
+            auto new_seed = seedseq();
+            parameters.seed = PARAMETERS.seed = new_seed;
+            auto sketch = Sketch(genomes, parameters);
+            auto matrix = compute_matrix(sketch, threads);
+            print_matrix(names, matrix);
+        }
     }
 
     return 0;
@@ -139,7 +148,6 @@ std::vector<double> compute_matrix(const Sketch& sketch, int threads)
 {
     auto ret = std::vector<double>();
     auto count = sketch.getReferenceCount();
-    std::cerr << "reference count: " << count << std::endl;
     ret.reserve(count * count);
     auto mat = [&](const size_t i, const size_t j)->double & {
         return ret[i * count + j];
