@@ -506,6 +506,26 @@ void Sketch::createIndex()
     kmerSpace = pow(parameters.alphabetSize, parameters.kmerSize);
 }
 
+struct badChar {
+    size_t index;
+    bool hasBadChar;
+};
+
+struct badChar findBadCharByAlphabet(const char *seq, uint64_t length, uint64_t offset, const Sketch::Parameters & parameters)
+{
+    int kmerSize = parameters.kmerSize;
+
+    for ( uint64_t j = offset; j < offset + kmerSize && offset + kmerSize <= length; j++ )
+    {
+        if ( ! parameters.alphabet[seq[j]] )
+        {
+            return {j, true};
+        }
+    }
+
+    return {0, false};
+}
+
 void addMinHashes(MinHashHeap & minHashHeap, char * seq, uint64_t length, const Sketch::Parameters & parameters)
 {
     int kmerSize = parameters.kmerSize;
@@ -537,21 +557,13 @@ void addMinHashes(MinHashHeap & minHashHeap, char * seq, uint64_t length, const 
     for ( uint64_t i = 0; i < length - kmerSize + 1; i++ )
     {
 		// repeatedly skip kmers with bad characters
-		//
-		bool bad = false;
-		//
-		for ( uint64_t j = i; j < i + kmerSize && i + kmerSize <= length; j++ )
-		{
-			if ( ! parameters.alphabet[seq[j]] )
-			{
-				i = j; // skip to past the bad character
-				bad = true;
-				break;
-			}
-		}
+        struct badChar maybeBadChar = findBadCharByAlphabet(seq, length, i, parameters);
+		bool bad = maybeBadChar.hasBadChar;
+
 		//
 		if ( bad )
 		{
+            i = maybeBadChar.index; // skip to past the bad character
 			continue;
 		}
 		//	
@@ -560,7 +572,7 @@ void addMinHashes(MinHashHeap & minHashHeap, char * seq, uint64_t length, const 
 			// skipped to end
 			break;
 		}
-            
+
         const char *kmer_fwd = seq + i;
         const char *kmer_rev = seqRev + length - i - kmerSize;
         const char * kmer = (noncanonical || memcmp(kmer_fwd, kmer_rev, kmerSize) <= 0) ? kmer_fwd : kmer_rev;
