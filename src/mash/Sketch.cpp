@@ -514,7 +514,6 @@ struct badChar {
 struct badChar findBadCharByAlphabet(const char *seq, uint64_t length, uint64_t offset, const Sketch::Parameters & parameters)
 {
     int kmerSize = parameters.kmerSize;
-
     for ( uint64_t j = offset; j < offset + kmerSize && offset + kmerSize <= length; j++ )
     {
         if ( ! parameters.alphabet[seq[j]] )
@@ -523,6 +522,120 @@ struct badChar findBadCharByAlphabet(const char *seq, uint64_t length, uint64_t 
         }
     }
 
+    return {0, false};
+}
+
+#include <emmintrin.h>
+#include <tmmintrin.h>
+
+struct badChar findBadCharCanonical(const char *seq, uint64_t length, uint64_t offset, const Sketch::Parameters & parameters)
+{
+    int kmerSize = parameters.kmerSize;
+
+    /**
+
+The following code is faster than `findBadCharByAlphabet` but far from
+trivial. So here I am taking some time and space to explain it. Where
+`findBadCharByAlphabet` looks up one character in a large table this
+function looks up multiple characters (a "chunk") at the same time.
+However, the table has to be reduced in size. Unless someone forgot to
+update this comment in the future, the chunk size and the table size
+are both 16 aka. `vec_size` aka. `sizeof(_m128i)`.
+
+-- Fabian Klötzl, July 2019 */
+
+    using vec_type = __m128i;
+    size_t vec_size = sizeof(vec_type);
+
+/*
+The default kmerSize is 21. Thus a kmer can be processed with one full
+chunk and a rest. The following line just computes how many full chunks
+there are.
+*/
+    size_t capped_kmerSize = kmerSize & ~(vec_size - 1);
+    size_t chunk_offset = 0;
+
+/*
+You should think of `mask_low_nibble` as basically a table of zeros.
+A few values are set to non-zero:
+
+  mask_low_nibble['A' & 0x0f] = 'A';
+  mask_low_nibble['C' & 0x0f] = 'C';
+  mask_low_nibble['G' & 0x0f] = 'G';
+  mask_low_nibble['T' & 0x0f] = 'T';
+
+Note, a nibble is half a byte.
+*/
+    vec_type mask_low_nibble = _mm_setr_epi8(0, 'A', 0, 'C', 'T', 0, 0, 'G', 0, 0, 0, 0, 0, 0, 0, 0);
+
+    for (; chunk_offset < capped_kmerSize; chunk_offset += vec_size) {
+        vec_type chunk;
+        /* Load a full chunk */
+        memcpy(&chunk, seq + offset + chunk_offset, vec_size);
+
+/*
+Here is where most of the magic happens. Let's assume `chunk[0]` is a C.
+Then the shuffle instruction is basically a bitwise-and followed by a table
+look-up.
+
+  mask_low_nibble[chunk[0] & 0x0f] -> 'C'
+
+Uninterestingly, we receive the same character as we put it. The same happens
+for A, G and T. These characters are stored in `canonicalized`. If the input
+character is a B, however a zero is returned and stored. As the table only
+considers the low nibble, there will be collisions.
+
+  mask_low_nibble['B' & 0x0f] -> 0
+  mask_low_nibble['A' & 0x0f] -> 'A'
+  mask_low_nibble['Q' & 0x0f] -> 'A'
+
+Our new variable `canonicalized` now has all the canonical nucleotides in
+the same places as `chunk`. All non-canonical spots now have either a zero
+or a wrong base.
+
+(The fact that shuffle also returns 0 if the high bit is set can be ignored
+here.)
+*/
+        vec_type canonicalized = _mm_shuffle_epi8(mask_low_nibble, chunk);
+
+/*
+We now compare `canonicalized` to `chunk`. The result will yield true (0xff)
+for every canonical base and false (0) otherwise. These values are stored per
+byte.
+*/
+        vec_type equal_mask = _mm_cmpeq_epi8(canonicalized, chunk);
+
+/*
+From this long byte vector we only take the highest bit of each byte (movemask).
+Each correct canonical bit is a 1 and each wrong nucleotide a 0. As we are
+interested in non-canonical bytes, the result needs to be bit-flipped. However,
+now we also inverted the higher 16 bits, which have to be masked off.
+*/
+        int mask = ~_mm_movemask_epi8(equal_mask) & ((1 << vec_size) - 1);
+        if (mask) {
+/*
+If the mask was truthy, there is at least one non-ACGT nucleotide. We can
+find its position in the chunk by counting the trailing zeros (CTZ). Note
+how the LSB corresponds to the first nucleotide as intel is little endian.
+*/
+            return {offset + chunk_offset + __builtin_ctz(mask), true};
+        }
+    }
+
+/* Do the same for the not completely filled rest. */
+    size_t rest = kmerSize - capped_kmerSize;
+    vec_type chunk = _mm_set1_epi8(0);
+    memcpy(&chunk, seq + offset + chunk_offset, rest);
+
+    vec_type canonicalized = _mm_shuffle_epi8(mask_low_nibble, chunk);
+    vec_type equal_mask = _mm_cmpeq_epi8(canonicalized, chunk);
+
+    int mask = ~_mm_movemask_epi8(equal_mask) & ((1 << rest) - 1);
+    if (mask) {
+        return {offset + chunk_offset + __builtin_ctz(mask), true};
+    }
+
+/* All nucleotides were canonical. Return. */
     return {0, false};
 }
 
@@ -557,7 +670,7 @@ void addMinHashes(MinHashHeap & minHashHeap, char * seq, uint64_t length, const 
     for ( uint64_t i = 0; i < length - kmerSize + 1; i++ )
     {
 		// repeatedly skip kmers with bad characters
-        struct badChar maybeBadChar = findBadCharByAlphabet(seq, length, i, parameters);
+        struct badChar maybeBadChar = findBadCharCanonical(seq, length, i, parameters);
 		bool bad = maybeBadChar.hasBadChar;
 
 		//
@@ -1077,14 +1190,15 @@ void reverseComplement(const char * src, char * dest, int length)
     {
         char base = src[i];
         
-        switch ( base )
-        {
-            case 'A': base = 'T'; break;
-            case 'C': base = 'G'; break;
-            case 'G': base = 'C'; break;
-            case 'T': base = 'A'; break;
-            default: break;
-        }
+        base ^= base & 2 ? 4 : 21;
+        // switch ( base )
+        // {
+        //     case 'A': base = 'T'; break;
+        //     case 'C': base = 'G'; break;
+        //     case 'G': base = 'C'; break;
+        //     case 'T': base = 'A'; break;
+        //     default: break;
+        // }
         
         dest[length - i - 1] = base;
     }
